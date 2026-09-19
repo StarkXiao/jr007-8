@@ -110,33 +110,18 @@ export const AUDIT_ACTIONS = {
   REPORT_RESOLVE: "report.resolve",
   REPORT_DISMISS: "report.dismiss",
   CATEGORY_SCHEMA_UPDATE: "category.schema.update",
+  APP_CONFIG_PUBLISH: "app_config.publish",
+  APP_CONFIG_CANARY: "app_config.canary",
+  APP_CONFIG_CANARY_PROMOTE: "app_config.canary.promote",
+  APP_CONFIG_CANARY_STOP: "app_config.canary.stop",
+  APP_CONFIG_DISCARD_DRAFT: "app_config.draft.discard",
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];
 
-/** 地图默认展示范围限制（防止一次性拉全表） */
-export const MAX_BBOX_SPAN_DEG = 5;
-export const MAX_PAGE_SIZE = 100;
-export const DEFAULT_PAGE_SIZE = 20;
-
-/** 评论编辑窗口与次数 */
-export const COMMENT_EDIT_WINDOW_MS = 10 * 60 * 1000;
-export const COMMENT_MAX_EDITS = 1;
-
-/** 同一用户对同一条目的确认冷却期 */
-export const CONFIRMATION_COOLDOWN_MS = 30 * 24 * 60 * 60 * 1000;
-
-/** 过期上报达到该数量后条目进入待复核 */
-export const STALE_REPORT_THRESHOLD = 3;
-
-/** 举报合并窗口 */
-export const REPORT_MERGE_WINDOW_MS = 24 * 60 * 60 * 1000;
-
-/** 审核任务领取锁时长 */
-export const REVIEW_LOCK_MS = 30 * 60 * 1000;
-
-/** 原图签名 URL 有效期 */
-export const SIGNED_URL_TTL_MS = 5 * 60 * 1000;
+// 业务阈值（分页、编辑窗口、冷却期、审核锁、签名 URL 有效期、过期上报阈值等）
+// 已全部改为在线配置，唯一事实来源是 app_config_versions 版本表，
+// 内置兜底默认值见 modules/appconfig/defaults.ts。不要再在这里新增可调阈值。
 
 export const IMAGE_VARIANTS = {
   thumb: 320,

@@ -4,7 +4,6 @@ import {
   AUDIT_ACTIONS,
   ERROR_CODES,
   PRIVACY_SENSITIVE_REASONS,
-  REPORT_MERGE_WINDOW_MS,
   REPORT_REASONS,
   REPORT_TARGET_TYPES,
   type ReportReason,
@@ -17,6 +16,7 @@ import { notify } from "../../services/notify";
 import { recordAudit } from "../../services/audit";
 import { adjustCredit, CREDIT_DELTAS } from "../../services/moderation/credit";
 import { revokePublicVariants } from "../media/service";
+import { cachedThresholds } from "../appconfig/service";
 import { isAdmin } from "../../types/auth";
 import type { AuthUser } from "../../types/auth";
 import { logger } from "../../utils/logger";
@@ -110,7 +110,7 @@ export async function createReport(reporter: AuthUser, input: CreateReportInput)
       targetId: input.targetId,
       status: { in: ["open", "in_review"] },
       mergedInto: null,
-      createdAt: { gte: new Date(Date.now() - REPORT_MERGE_WINDOW_MS) },
+      createdAt: { gte: new Date(Date.now() - cachedThresholds().reportMergeWindowMs) },
     },
     orderBy: { createdAt: "asc" },
   });

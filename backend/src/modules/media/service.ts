@@ -1,11 +1,8 @@
 import { env } from "../../config/env";
-import {
-  ERROR_CODES,
-  PUBLISHABLE_PRIVACY_STATUSES,
-  SIGNED_URL_TTL_MS,
-} from "../../config/constants";
+import { ERROR_CODES, PUBLISHABLE_PRIVACY_STATUSES } from "../../config/constants";
 import { prisma, toJsonValue } from "../../db/prisma";
 import { AppError } from "../../utils/errors";
+import { cachedThresholds } from "../appconfig/service";
 import { getStorage } from "../../services/storage";
 import {
   contentHash,
@@ -450,7 +447,7 @@ export async function signedOriginalUrl(assetUuid: string): Promise<string> {
   if (!asset) throw AppError.notFound("图片不存在");
   if (!asset.originalPath) throw AppError.notFound("原图已按隐私策略清理");
 
-  return getStorage().signedPrivateUrl(asset.originalPath, SIGNED_URL_TTL_MS);
+  return getStorage().signedPrivateUrl(asset.originalPath, cachedThresholds().signedUrlTtlMs);
 }
 
 /** 签名 URL 回源读取（仅本地存储驱动需要） */

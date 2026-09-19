@@ -57,6 +57,18 @@ const router = createRouter({
       component: () => import("@/pages/AdminPage.vue"),
       meta: { requiresRole: "admin" },
     },
+    {
+      path: "/admin/config",
+      name: "app-config",
+      component: () => import("@/pages/ConfigPage.vue"),
+      meta: { requiresRole: "admin" },
+    },
+    {
+      path: "/admin/config/:version",
+      name: "config-version",
+      component: () => import("@/pages/ConfigVersionPage.vue"),
+      meta: { requiresRole: "admin" },
+    },
     { path: "/:pathMatch(.*)*", name: "not-found", component: () => import("@/pages/NotFoundPage.vue") },
   ],
   scrollBehavior: () => ({ top: 0 }),

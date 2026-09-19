@@ -1,18 +1,23 @@
 <script setup lang="ts">
 import { onMounted, ref } from "vue";
+import { useRouter } from "vue-router";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { api } from "@/api/client";
 import { useCatalogStore } from "@/stores/catalog";
 
 const catalog = useCatalogStore();
+const router = useRouter();
 const tab = ref("dashboard");
+
+function goConfig(): void {
+  router.push({ name: "app-config" });
+}
 
 const dashboard = ref<Record<string, any> | null>(null);
 const users = ref<Array<Record<string, any>>>([]);
 const userQuery = ref({ q: "", role: "", status: "" });
 const appeals = ref<Array<Record<string, any>>>([]);
 const audits = ref<Array<Record<string, any>>>([]);
-const categories = ref<Array<Record<string, any>>>([]);
 const loading = ref(false);
 
 async function loadDashboard() {
@@ -37,11 +42,6 @@ async function loadAppeals() {
 async function loadAudits() {
   const result = await api.get<{ items: Array<Record<string, any>> }>("/admin/audit-logs", { pageSize: 50 });
   audits.value = result.items;
-}
-
-async function loadCategories() {
-  const result = await api.get<{ items: Array<Record<string, any>> }>("/admin/categories");
-  categories.value = result.items;
 }
 
 async function banUser(row: Record<string, any>) {
@@ -107,44 +107,11 @@ async function decideAppeal(row: Record<string, any>, decision: "approve" | "uph
   }
 }
 
-async function updateSchema(row: Record<string, any>) {
-  try {
-    const { value } = await ElMessageBox.prompt("粘贴新的属性 Schema（JSON）", `编辑「${row.name}」的属性`, {
-      inputType: "textarea",
-      inputValue: JSON.stringify(row.schema, null, 2),
-      inputValidator: (text) => {
-        try {
-          JSON.parse(text ?? "");
-          return true;
-        } catch {
-          return "JSON 格式不正确";
-        }
-      },
-    });
-
-    const result = await api.put<{ version: number; changed: boolean }>(`/admin/categories/${row.id}/schema`, {
-      schema: JSON.parse(value),
-    });
-
-    ElMessage.success(result.changed ? `已发布 Schema 版本 v${result.version}` : "内容没有变化");
-    await loadCategories();
-  } catch (error) {
-    if (error instanceof Error && error.message) ElMessage.error(error.message);
-  }
-}
-
-async function toggleCategory(row: Record<string, any>) {
-  await api.patch(`/admin/categories/${row.id}`, { isActive: !row.isActive });
-  ElMessage.success(row.isActive ? "已停用该分类" : "已启用该分类");
-  await loadCategories();
-}
-
 async function loadTab(name: string) {
   loading.value = true;
   try {
     if (name === "dashboard") await loadDashboard();
     if (name === "users") await loadUsers();
-    if (name === "categories") await loadCategories();
     if (name === "appeals") await loadAppeals();
     if (name === "audit") await loadAudits();
   } catch (error) {
@@ -266,41 +233,16 @@ onMounted(async () => {
         </el-table>
       </el-tab-pane>
 
-      <el-tab-pane label="分类与属性" name="categories">
-        <el-alert
-          type="info"
-          :closable="false"
-          show-icon
-          title="属性 Schema 是版本化的"
-          description="发布新版本后，已存在的条目不受影响，只有新提交会按新版本校验。"
-          style="margin-bottom: 12px"
-        />
-
-        <el-table :data="categories" style="width: 100%">
-          <el-table-column prop="name" label="分类" width="120" />
-          <el-table-column prop="code" label="代码" width="160" />
-          <el-table-column label="属性数量" width="100">
-            <template #default="{ row }">
-              {{ Object.keys(row.schema?.properties ?? {}).length }}
-            </template>
-          </el-table-column>
-          <el-table-column prop="schemaVersion" label="Schema 版本" width="120" />
-          <el-table-column label="状态" width="100">
-            <template #default="{ row }">
-              <el-tag :type="row.isActive ? 'success' : 'info'" size="small">
-                {{ row.isActive ? "启用" : "停用" }}
-              </el-tag>
-            </template>
-          </el-table-column>
-          <el-table-column label="操作" min-width="200">
-            <template #default="{ row }">
-              <el-button size="small" @click="updateSchema(row)">编辑属性</el-button>
-              <el-button size="small" @click="toggleCategory(row)">
-                {{ row.isActive ? "停用" : "启用" }}
-              </el-button>
-            </template>
-          </el-table-column>
-        </el-table>
+      <el-tab-pane label="在线配置" name="categories">
+        <el-result
+          icon="info"
+          title="分类、属性表单与业务阈值已改为在线配置"
+          sub-title="支持草稿预演、按用户桶灰度发布、一键回滚到任意历史版本。"
+        >
+          <template #extra>
+            <el-button type="primary" @click="goConfig">打开配置工作台</el-button>
+          </template>
+        </el-result>
       </el-tab-pane>
 
       <el-tab-pane label="申诉终审" name="appeals">

@@ -1,11 +1,6 @@
 import type { Prisma, SpotStatus } from "@prisma/client";
 import { env } from "../../config/env";
-import {
-  CONFIRMATION_COOLDOWN_MS,
-  ERROR_CODES,
-  STALE_REPORT_THRESHOLD,
-  MAX_BBOX_SPAN_DEG,
-} from "../../config/constants";
+import { ERROR_CODES } from "../../config/constants";
 import { prisma, toJsonValue } from "../../db/prisma";
 import { AppError } from "../../utils/errors";
 import { parsePagination, pagedResult } from "../../utils/pagination";
@@ -14,6 +9,7 @@ import { computeFreshness } from "../../services/moderation/credit";
 import { boundingBox, fuzzCoordinates, haversineMeters, isValidLatLng, reverseGeocode } from "../../services/geo";
 import { assertAttributesValid, validateAttributes } from "../categories/schemaValidator";
 import { requireCategoryByCode } from "../categories/service";
+import { activeThresholds, activeBundle, cachedThresholds } from "../appconfig/service";
 import { serializeSpot } from "../shared/serialize";
 import type { AuthUser } from "../../types/auth";
 import { isModerator } from "../../types/auth";
@@ -78,7 +74,10 @@ function parseBbox(raw: string | undefined) {
   if (!isValidLatLng(minLat, minLng) || !isValidLatLng(maxLat, maxLng)) {
     throw AppError.badRequest("bbox 坐标超出合法范围");
   }
-  if (Math.abs(maxLng - minLng) > MAX_BBOX_SPAN_DEG || Math.abs(maxLat - minLat) > MAX_BBOX_SPAN_DEG) {
+  if (
+    Math.abs(maxLng - minLng) > activeThresholds().maxBboxSpanDeg ||
+    Math.abs(maxLat - minLat) > activeThresholds().maxBboxSpanDeg
+  ) {
     throw AppError.badRequest("地图范围过大，请放大后再筛选");
   }
   return { minLng, minLat, maxLng, maxLat };
@@ -416,7 +415,7 @@ export async function runAutoCheck(spotId: bigint): Promise<AutoCheckResult> {
   const spot = await prisma.spot.findUnique({
     where: { id: spotId },
     include: {
-      category: { include: { schemas: { where: { isCurrent: true }, take: 1 } } },
+      category: true,
       media: true,
     },
   });
@@ -425,10 +424,10 @@ export async function runAutoCheck(spotId: bigint): Promise<AutoCheckResult> {
   const issues: AutoCheckIssue[] = [];
   const meta: Record<string, unknown> = {};
 
-  // 1) 必填属性
-  const schema = spot.category.schemas[0];
+  // 1) 必填属性——按本次提交者视角的生效配置（灰度用户按灰度 Schema 校验）
+  const schema = activeBundle().categories.find((category) => category.code === spot.category.code)?.schema;
   if (schema) {
-    const result = validateAttributes(schema.schema as never, (spot.attributes ?? {}) as Record<string, unknown>);
+    const result = validateAttributes(schema, (spot.attributes ?? {}) as Record<string, unknown>);
     if (!result.ok) {
       issues.push(...result.errors.map((error) => ({ code: "ATTRIBUTE_INVALID", message: error.message })));
     }
@@ -557,7 +556,7 @@ export async function submitForReview(uuid: string, user: AuthUser, options: { f
   const spot = await prisma.spot.findUnique({
     where: { uuid },
     include: {
-      category: { include: { schemas: { where: { isCurrent: true }, take: 1 } } },
+      category: true,
       media: { select: { uuid: true, privacyStatus: true } },
     },
   });
@@ -713,11 +712,17 @@ export async function confirmSpot(uuid: string, user: AuthUser, isAccurate: bool
   if (!spot || spot.status !== "published") throw AppError.notFound("该地点不存在或尚未发布");
   if (spot.ownerId === user.id) throw AppError.badRequest("不能确认自己提交的条目，请邀请其他人来确认");
 
+  // 阈值来自在线配置（热路径用同步缓存读取，避免给互动接口增加一次 await）
+  const thresholds = cachedThresholds();
   const recent = await prisma.spotConfirmation.findFirst({
-    where: { spotId: spot.id, userId: user.id, createdAt: { gte: new Date(Date.now() - CONFIRMATION_COOLDOWN_MS) } },
+    where: { spotId: spot.id, userId: user.id, createdAt: { gte: new Date(Date.now() - thresholds.confirmationCooldownMs) } },
   });
   if (recent) {
-    throw AppError.conflict(ERROR_CODES.ALREADY_CONFIRMED, "你最近已经确认过这条记录，30 天后可以再次确认");
+    const days = Math.round(thresholds.confirmationCooldownMs / (24 * 3600 * 1000));
+    throw AppError.conflict(
+      ERROR_CODES.ALREADY_CONFIRMED,
+      `你最近已经确认过这条记录，${days} 天后可以再次确认`,
+    );
   }
 
   await prisma.spotConfirmation.create({
@@ -741,7 +746,7 @@ export async function confirmSpot(uuid: string, user: AuthUser, isAccurate: bool
     publishedAt: spot.publishedAt,
   });
 
-  const shouldMarkStale = !isAccurate && staleReportCount >= STALE_REPORT_THRESHOLD;
+  const shouldMarkStale = !isAccurate && staleReportCount >= cachedThresholds().staleReportThreshold;
 
   await prisma.spot.update({
     where: { id: spot.id },

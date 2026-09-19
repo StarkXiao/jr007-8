@@ -1,16 +1,11 @@
 import type { Prisma, ReviewStatus } from "@prisma/client";
-import {
-  AUDIT_ACTIONS,
-  ERROR_CODES,
-  REVIEW_LOCK_MS,
-  REVIEW_REASON_CODES,
-  MAX_PAGE_SIZE,
-} from "../../config/constants";
+import { AUDIT_ACTIONS, ERROR_CODES, REVIEW_REASON_CODES } from "../../config/constants";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../utils/errors";
 import { parsePagination, pagedResult } from "../../utils/pagination";
 import { serializeMedia } from "../shared/serialize";
 import { recordAudit } from "../../services/audit";
+import { activeThresholds, activeBundle, effectiveVersion } from "../appconfig/service";
 import type { AuthUser } from "../../types/auth";
 
 // ------------------------------------------------------------------ 队列
@@ -27,7 +22,7 @@ export interface QueueQuery {
 export async function listQueue(query: QueueQuery) {
   const pagination = parsePagination({
     page: query.page,
-    pageSize: Math.min(query.pageSize, MAX_PAGE_SIZE),
+    pageSize: Math.min(query.pageSize, activeThresholds().maxPageSize),
   });
 
   const where: Prisma.ReviewTaskWhereInput = {
@@ -112,6 +107,7 @@ export async function listQueue(query: QueueQuery) {
 // 应用层"先查再改"在并发下必然出现两个人同时拿到同一任务。
 export async function claimTask(taskId: bigint, moderator: AuthUser) {
   const now = new Date();
+  const lockMs = activeThresholds().reviewLockMs;
   const updated = await prisma.reviewTask.updateMany({
     where: {
       id: taskId,
@@ -120,7 +116,7 @@ export async function claimTask(taskId: bigint, moderator: AuthUser) {
     },
     data: {
       assignedTo: moderator.id,
-      lockedUntil: new Date(now.getTime() + REVIEW_LOCK_MS),
+      lockedUntil: new Date(now.getTime() + lockMs),
       status: "in_review",
     },
   });
@@ -144,7 +140,7 @@ export async function claimTask(taskId: bigint, moderator: AuthUser) {
     targetId: taskId,
   });
 
-  return { taskId, lockedUntil: new Date(Date.now() + REVIEW_LOCK_MS) };
+  return { taskId, lockedUntil: new Date(Date.now() + lockMs) };
 }
 
 export async function releaseTask(taskId: bigint, moderator: AuthUser) {
@@ -168,7 +164,7 @@ export async function getTaskDetail(taskId: bigint, moderator: AuthUser) {
     include: {
       spot: {
         include: {
-          category: { include: { schemas: { where: { isCurrent: true }, take: 1 } } },
+          category: true,
           owner: { select: { uuid: true, nickname: true, creditScore: true, approvedCount: true } },
           media: {
             orderBy: { id: "asc" },
@@ -202,7 +198,11 @@ export async function getTaskDetail(taskId: bigint, moderator: AuthUser) {
     select: { revisionNo: true, snapshot: true, createdAt: true },
   });
 
-  const schema = task.spot.category.schemas[0];
+  // 属性表单取当前生效配置（审核员看到的与提交者一致）；
+  // 快照里的 categorySchemaVersion 则保留了提交当时的历史版本
+  const effectiveCategory = activeBundle().categories.find(
+    (category) => category.code === task.spot.category.code,
+  );
   const now = Date.now();
   const lockActive = task.lockedUntil !== null && task.lockedUntil.getTime() > now;
 
@@ -239,8 +239,8 @@ export async function getTaskDetail(taskId: bigint, moderator: AuthUser) {
         color: task.spot.category.color,
         icon: task.spot.category.icon,
       },
-      schemaVersion: schema?.version ?? 0,
-      schema: schema?.schema ?? {},
+      schemaVersion: effectiveCategory ? effectiveVersion() : task.revision.schemaVersion,
+      schema: effectiveCategory?.schema ?? {},
       exactLocation: { lat: task.spot.exactLat, lng: task.spot.exactLng },
       fuzzEnabled: task.spot.fuzzEnabled,
       fuzzRadiusM: task.spot.fuzzRadiusM,

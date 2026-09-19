@@ -1,11 +1,11 @@
 import { prisma } from "../db/prisma";
 import { env } from "../config/env";
-import { STALE_REPORT_THRESHOLD } from "../config/constants";
 import { computeFreshness } from "../services/moderation/credit";
 import { purgeOriginal } from "../modules/media/service";
 import { notify } from "../services/notify";
 import { logger } from "../utils/logger";
 import { redis } from "../db/redis";
+import { cachedThresholds, refreshConfig, subscribeInvalidation } from "../modules/appconfig/service";
 
 const MS_PER_DAY = 86400000;
 const OVERDUE_ALERT_KEY = "psdm:sla-alert-sent";
@@ -109,10 +109,11 @@ export async function staleSweep(): Promise<{ recomputed: number; markedStale: n
       publishedAt: spot.publishedAt,
     });
 
-    // 长期没有任何确认，且分数跌破 30，视为疑似过期
+    // 阈值在线可配；巡检在请求外运行，按全量配置取阈值
+    const staleThreshold = cachedThresholds().staleReportThreshold;
     const shouldMarkStale =
       !spot.isStale &&
-      (spot.staleReportCount >= STALE_REPORT_THRESHOLD ||
+      (spot.staleReportCount >= staleThreshold ||
         (freshnessScore < 30 && spot.confirmCount === 0));
 
     await prisma.spot.update({

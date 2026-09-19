@@ -52,6 +52,7 @@ async function goNotifications() {
           <RouterLink to="/reports">举报处置</RouterLink>
         </template>
         <template v-if="auth.isAdmin">
+          <RouterLink to="/admin/config">在线配置</RouterLink>
           <RouterLink to="/admin">管理后台</RouterLink>
         </template>
       </nav>

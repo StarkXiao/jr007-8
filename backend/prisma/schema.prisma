@@ -85,6 +85,20 @@ enum BlurAlgorithm {
   gaussian
 }
 
+/**
+ * 在线配置版本状态机：
+ * draft   草稿，只有作者/管理员可见，可反复修改
+ * canary  灰度版本，按用户桶 + 管理员白名单对部分请求生效
+ * active  全量生效版本，全局唯一
+ * archived 历史版本（旧 active / 已结束灰度），只读，可随时再次发布
+ */
+enum AppConfigStatus {
+  draft
+  canary
+  active
+  archived
+}
+
 model User {
   id            BigInt     @id @default(autoincrement())
   uuid          String     @unique @default(uuid()) @db.Uuid
@@ -121,6 +135,8 @@ model User {
   reviewTasksDecided ReviewTask[]      @relation("ReviewDecidedBy")
   blurRegions       BlurRegion[]
   categorySchemas   CategorySchema[]
+  configVersions    AppConfigVersion[] @relation("AppConfigCreatedBy")
+  configPublished   AppConfigVersion[] @relation("AppConfigPublishedBy")
   settings          UserSetting?
 
   @@index([role, status], map: "idx_users_role_status")
@@ -470,4 +486,31 @@ model AuditLog {
   @@index([targetType, targetId, createdAt], map: "idx_audit_target")
   @@index([action, createdAt], map: "idx_audit_action")
   @@map("audit_logs")
+}
+
+// ------------------------------------------------------------------ 在线配置
+
+/// 分类 / 属性表单 / 业务阈值的统一版本化配置。
+/// 每一行是一个不可变的完整配置包（快照），灰度与回滚都只是行之间的状态流转，
+/// 因此"一键回滚到任意历史版本"天然等价于"把历史版本的内容再发一次"。
+model AppConfigVersion {
+  id           BigInt          @id @default(autoincrement())
+  version      Int             @unique
+  status       AppConfigStatus @default(draft)
+  bundle       Json
+  // 灰度规则，仅 status=canary 时有值：percent 为 0-100 的用户桶比例，
+  // userUuids 为显式白名单（管理员预演 / 内测账号）
+  canaryRule   Json?           @map("canary_rule")
+  note         String?         @db.VarChar(200)
+  createdBy    BigInt?          @map("created_by")
+  publishedBy  BigInt?          @map("published_by")
+  publishedAt  DateTime?       @map("published_at") @db.Timestamptz(6)
+  createdAt    DateTime        @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt    DateTime        @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  creator   User? @relation("AppConfigCreatedBy", fields: [createdBy], references: [id])
+  publisher User? @relation("AppConfigPublishedBy", fields: [publishedBy], references: [id])
+
+  @@index([status], map: "idx_app_config_status")
+  @@map("app_config_versions")
 }

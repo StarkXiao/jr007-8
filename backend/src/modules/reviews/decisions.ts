@@ -4,7 +4,7 @@ import { prisma } from "../../db/prisma";
 import { AppError } from "../../utils/errors";
 import { fuzzCoordinates, reverseGeocode } from "../../services/geo";
 import { assertAttributesValid } from "../categories/schemaValidator";
-import { requireCategoryByCode } from "../categories/service";
+import { requireCategoryForReview } from "../categories/service";
 import { assertAllPublishable } from "../media/service";
 import { notify } from "../../services/notify";
 import { adjustCredit, CREDIT_DELTAS, incrementApprovedCount } from "../../services/moderation/credit";
@@ -92,7 +92,7 @@ export async function approveTask(
   const task = await loadDecidableTask(taskId, moderator);
   assertAllPublishable(task.spot.media);
 
-  const category = await requireCategoryByCode(task.spot.category.code);
+  const category = await requireCategoryForReview(task.spot.category.code);
   assertAttributesValid(category.schema, (task.spot.attributes ?? {}) as Record<string, unknown>);
 
   const { point, addressText } = await resolvePublicPoint(task.spot);
@@ -346,7 +346,7 @@ export async function decideAppeal(
   // 改判通过仍需通过隐私门禁——改判不能成为绕过隐私要求的后门
   assertAllPublishable(task.spot.media);
 
-  const category = await requireCategoryByCode(task.spot.category.code);
+  const category = await requireCategoryForReview(task.spot.category.code);
   assertAttributesValid(category.schema, (task.spot.attributes ?? {}) as Record<string, unknown>);
 
   const { point, addressText } = await resolvePublicPoint(task.spot);

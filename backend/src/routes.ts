@@ -9,9 +9,11 @@ import { reportsRouter, moderationReportsRouter } from "./modules/reports/routes
 import { notificationsRouter } from "./modules/notifications/routes";
 import { usersRouter } from "./modules/users/routes";
 import { adminRouter } from "./modules/admin/routes";
+import { adminConfigRouter } from "./modules/appconfig/routes";
 import { REVIEW_REASON_CODES, REPORT_REASONS, NOTIFICATION_TYPES } from "./config/constants";
 import { ok } from "./utils/serialize";
 import { asyncHandler } from "./utils/asyncHandler";
+import { activeThresholds } from "./modules/appconfig/service";
 
 // 所有业务路由挂载在 /api/v1 下。
 // 公开只读路由放在前面便于阅读，实际匹配由 Express 路由表决定。
@@ -22,11 +24,22 @@ export function buildApiRouter(): Router {
   router.get(
     "/meta",
     asyncHandler(async (req, res) => {
+      // 只暴露用户可见的阈值，分页/锁时长等服务端参数不下发
+      const thresholds = activeThresholds();
       res.json(
         ok(req, {
           reviewReasonCodes: Object.entries(REVIEW_REASON_CODES).map(([code, label]) => ({ code, label })),
           reportReasons: Object.entries(REPORT_REASONS).map(([code, label]) => ({ code, label })),
           notificationTypes: Object.keys(NOTIFICATION_TYPES),
+          config: {
+            version: req.config?.effectiveVersion ?? 0,
+            canary: req.config?.canary ?? false,
+            thresholds: {
+              commentEditWindowMs: thresholds.commentEditWindowMs,
+              commentMaxEdits: thresholds.commentMaxEdits,
+              confirmationCooldownMs: thresholds.confirmationCooldownMs,
+            },
+          },
         }),
       );
     }),
@@ -49,6 +62,7 @@ export function buildApiRouter(): Router {
   router.use(moderationCommentsRouter);
   router.use(moderationReportsRouter);
   router.use(adminRouter);
+  router.use(adminConfigRouter);
 
   return router;
 }

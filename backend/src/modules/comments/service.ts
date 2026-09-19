@@ -1,10 +1,5 @@
 import type { CommentStatus } from "@prisma/client";
-import {
-  AUDIT_ACTIONS,
-  COMMENT_EDIT_WINDOW_MS,
-  COMMENT_MAX_EDITS,
-  ERROR_CODES,
-} from "../../config/constants";
+import { AUDIT_ACTIONS, ERROR_CODES } from "../../config/constants";
 import { env } from "../../config/env";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../utils/errors";
@@ -13,6 +8,7 @@ import { checkText } from "../../services/moderation/contentFilter";
 import { adjustCredit, CREDIT_DELTAS } from "../../services/moderation/credit";
 import { notify } from "../../services/notify";
 import { recordAudit } from "../../services/audit";
+import { cachedThresholds } from "../appconfig/service";
 import { serializeComment } from "../shared/serialize";
 import { isModerator } from "../../types/auth";
 import type { AuthUser } from "../../types/auth";
@@ -193,11 +189,19 @@ export async function updateComment(commentId: bigint, user: AuthUser, body: str
   if (!comment || comment.status === "deleted") throw AppError.notFound("评论不存在");
   if (comment.userId !== user.id) throw AppError.forbidden("只能编辑自己的评论");
 
-  if (Date.now() - comment.createdAt.getTime() > COMMENT_EDIT_WINDOW_MS) {
-    throw AppError.unprocessable(ERROR_CODES.SPOT_STATE_INVALID, "评论发布 10 分钟后不能再编辑");
+  const thresholds = cachedThresholds();
+  if (Date.now() - comment.createdAt.getTime() > thresholds.commentEditWindowMs) {
+    const minutes = Math.round(thresholds.commentEditWindowMs / 60000);
+    throw AppError.unprocessable(
+      ERROR_CODES.SPOT_STATE_INVALID,
+      `评论发布 ${minutes} 分钟后不能再编辑`,
+    );
   }
-  if (comment.editCount >= COMMENT_MAX_EDITS) {
-    throw AppError.unprocessable(ERROR_CODES.SPOT_STATE_INVALID, "评论只能编辑 1 次");
+  if (comment.editCount >= thresholds.commentMaxEdits) {
+    throw AppError.unprocessable(
+      ERROR_CODES.SPOT_STATE_INVALID,
+      `评论只能编辑 ${thresholds.commentMaxEdits} 次`,
+    );
   }
 
   assertCommentContent(body);

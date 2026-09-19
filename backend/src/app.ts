@@ -7,14 +7,19 @@ import { env } from "./config/env";
 import { logger } from "./utils/logger";
 import { requestId } from "./middleware/requestId";
 import { optionalAuth } from "./middleware/auth";
+import { resolveConfig } from "./middleware/configContext";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler";
 import { buildApiRouter } from "./routes";
 import { pingRedis } from "./db/redis";
 import { prisma } from "./db/prisma";
 import { buildAllowedOrigins } from "./config/origins";
+import { refreshConfig, subscribeInvalidation } from "./modules/appconfig/service";
 
 export function createApp(): Express {
   const app = express();
+
+  // 启动时预热在线配置；失败不阻塞启动（有内置默认配置兜底）
+  void refreshConfig(true).then(() => subscribeInvalidation()).catch(() => undefined);
 
   // 反向代理后要拿到真实客户端 IP，限流与审计都依赖它
   app.set("trust proxy", true);
@@ -59,10 +64,7 @@ export function createApp(): Express {
   app.use(express.json({ limit: "1mb" }));
   app.use(express.urlencoded({ extended: false }));
 
-  // 全局解析登录态：读接口据此返回作者可见的字段，写接口各自再强制鉴权
-  app.use(optionalAuth);
-
-  // 健康检查：存活与就绪分开，便于编排系统正确判断
+  // 健康检查放在配置解析之前：探针不应依赖配置表，也不应被其失败拖慢
   app.get("/healthz", (_req, res) => {
     res.json({ status: "ok", uptime: Math.round(process.uptime()) });
   });
@@ -91,6 +93,13 @@ export function createApp(): Express {
       node: process.version,
     });
   });
+
+  // 全局解析登录态：读接口据此返回作者可见的字段，写接口各自再强制鉴权
+  app.use(optionalAuth);
+
+  // 登录态之后解析本次请求生效的在线配置（含灰度判定），
+  // 业务代码通过 activeThresholds() / listEffectiveCategories() 读取
+  app.use(resolveConfig);
 
   app.use("/api/v1", buildApiRouter());
 

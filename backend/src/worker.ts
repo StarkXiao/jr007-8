@@ -13,6 +13,7 @@ import { initStorage } from "./services/storage";
 import { disconnectPrisma } from "./db/prisma";
 import { closeRedis, redis } from "./db/redis";
 import { logger } from "./utils/logger";
+import { refreshConfig, subscribeInvalidation } from "./modules/appconfig/service";
 
 // 定时任务调度配置。
 // 使用 BullMQ 的 Job Scheduler（每次启动时 upsert），
@@ -41,6 +42,12 @@ async function runSweep(task: SweepJobData["task"]) {
 
 async function bootstrap(): Promise<void> {
   await initStorage();
+
+  // 预热在线配置并订阅发布事件：worker 上的定时任务必须用到最新阈值
+  await refreshConfig(true).catch((error) => {
+    logger.warn({ err: (error as Error).message }, "在线配置预热失败，使用默认配置兜底");
+  });
+  await subscribeInvalidation().catch(() => undefined);
 
   const imageWorker = new Worker<ImageJobData>(
     QUEUE_NAMES.IMAGE,
