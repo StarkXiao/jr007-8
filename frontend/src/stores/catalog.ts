@@ -14,14 +14,19 @@ export const useCatalogStore = defineStore("catalog", () => {
   const categories = ref<Category[]>([]);
   const meta = ref<MetaPayload>({ reviewReasonCodes: [], reportReasons: [] });
   const loaded = ref(false);
+  // 后端灰度命中时该用户拿到的是 canary 版本，用版本号+状态标识
+  const configVersion = ref<number | null>(null);
+  const configStatus = ref<"active" | "canary" | null>(null);
 
   async function load(force = false): Promise<void> {
     if (loaded.value && !force) return;
     const [categoryResult, metaResult] = await Promise.all([
-      api.get<{ items: Category[] }>("/categories"),
+      api.get<{ items: Array<Category & { configStatus?: "active" | "canary" }> }>("/categories"),
       api.get<MetaPayload>("/meta"),
     ]);
     categories.value = categoryResult.items;
+    configVersion.value = categoryResult.items[0]?.schemaVersion ?? null;
+    configStatus.value = categoryResult.items[0]?.configStatus ?? "active";
     meta.value = metaResult;
     loaded.value = true;
   }
@@ -30,5 +35,5 @@ export const useCatalogStore = defineStore("catalog", () => {
     return categories.value.find((item) => item.code === code);
   }
 
-  return { categories, meta, loaded, load, byCode };
+  return { categories, meta, loaded, configVersion, configStatus, load, byCode };
 });

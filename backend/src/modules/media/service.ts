@@ -2,7 +2,6 @@ import { env } from "../../config/env";
 import {
   ERROR_CODES,
   PUBLISHABLE_PRIVACY_STATUSES,
-  SIGNED_URL_TTL_MS,
 } from "../../config/constants";
 import { prisma, toJsonValue } from "../../db/prisma";
 import { AppError } from "../../utils/errors";
@@ -15,6 +14,7 @@ import {
 } from "../../services/imaging";
 import { detectSensitiveRegions } from "../../services/detection";
 import { enqueueImageJob } from "../../services/queue";
+import { getThreshold } from "../config/service";
 import { logger } from "../../utils/logger";
 import { isModerator } from "../../types/auth";
 import type { AuthUser } from "../../types/auth";
@@ -445,12 +445,15 @@ export async function getVariant(
   return { ...object, publishable };
 }
 
-export async function signedOriginalUrl(assetUuid: string): Promise<string> {
+export async function signedOriginalUrl(assetUuid: string, viewer?: AuthUser): Promise<{ url: string; ttlSeconds: number }> {
   const asset = await prisma.mediaAsset.findUnique({ where: { uuid: assetUuid } });
   if (!asset) throw AppError.notFound("图片不存在");
   if (!asset.originalPath) throw AppError.notFound("原图已按隐私策略清理");
 
-  return getStorage().signedPrivateUrl(asset.originalPath, SIGNED_URL_TTL_MS);
+  // 签名有效期是在线配置项，越短越安全
+  const ttlSeconds = (await getThreshold("signedUrlTtlMinutes", viewer)) * 60;
+  const url = await getStorage().signedPrivateUrl(asset.originalPath, ttlSeconds * 1000);
+  return { url, ttlSeconds };
 }
 
 /** 签名 URL 回源读取（仅本地存储驱动需要） */

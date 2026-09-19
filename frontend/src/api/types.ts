@@ -27,6 +27,7 @@ export interface Category {
   sortOrder?: number;
   isActive?: boolean;
   schemaVersion: number;
+  configStatus?: "active" | "canary";
   schema: AttributeSchema;
 }
 
@@ -240,4 +241,74 @@ export interface ReportItem {
   reporter: { uuid: string; nickname: string };
   handler: string | null;
   relatedCount: number;
+}
+
+// ---------------------------------------------------------------- 在线配置
+
+export type ConfigStatus = "draft" | "canary" | "active" | "archived";
+
+export interface ThresholdSpec {
+  key: string;
+  label: string;
+  description: string;
+  unit: "count" | "minutes" | "degrees" | "days" | "percent";
+  min: number;
+  max: number;
+  integer: boolean;
+  default: number;
+}
+
+export interface ConfigCategoryPayload {
+  code: string;
+  name: string;
+  icon: string;
+  color: string;
+  description: string | null;
+  sortOrder: number;
+  isActive: boolean;
+  schema: AttributeSchema;
+}
+
+export type ConfigThresholds = Record<string, number>;
+
+export interface ConfigPayload {
+  categories: ConfigCategoryPayload[];
+  thresholds: ConfigThresholds;
+}
+
+export interface RolloutRule {
+  userModBase?: number;
+  userModRemainders?: number[];
+  roles?: string[];
+  userUuids?: string[];
+  percent?: number;
+}
+
+export interface ConfigVersionView {
+  id: string;
+  version: number;
+  status: ConfigStatus;
+  payload: ConfigPayload;
+  rollout: RolloutRule | null;
+  comment: string | null;
+  createdAt: string;
+  updatedAt: string;
+  publishedAt: string | null;
+  creator: { nickname: string } | null;
+  publisher: { nickname: string } | null;
+}
+
+export interface ConfigVersionsResponse {
+  versions: ConfigVersionView[];
+  active: ConfigVersionView | null;
+  canary: ConfigVersionView | null;
+  draft: ConfigVersionView | null;
+}
+
+export interface ConfigPreviewResult {
+  matched: boolean;
+  reason: string;
+  payload: ConfigPayload | null;
+  activeVersion: number | null;
+  previewVersion: number | null;
 }

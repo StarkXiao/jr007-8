@@ -2,7 +2,6 @@ import type { Prisma, ReviewStatus } from "@prisma/client";
 import {
   AUDIT_ACTIONS,
   ERROR_CODES,
-  REVIEW_LOCK_MS,
   REVIEW_REASON_CODES,
   MAX_PAGE_SIZE,
 } from "../../config/constants";
@@ -11,6 +10,7 @@ import { AppError } from "../../utils/errors";
 import { parsePagination, pagedResult } from "../../utils/pagination";
 import { serializeMedia } from "../shared/serialize";
 import { recordAudit } from "../../services/audit";
+import { getThreshold, resolveConfig } from "../config/service";
 import type { AuthUser } from "../../types/auth";
 
 // ------------------------------------------------------------------ 队列
@@ -112,6 +112,8 @@ export async function listQueue(query: QueueQuery) {
 // 应用层"先查再改"在并发下必然出现两个人同时拿到同一任务。
 export async function claimTask(taskId: bigint, moderator: AuthUser) {
   const now = new Date();
+  // 锁时长是在线配置项；审核台行为类阈值按操作者命中的版本取值
+  const lockMs = (await getThreshold("reviewLockMinutes", moderator)) * 60_000;
   const updated = await prisma.reviewTask.updateMany({
     where: {
       id: taskId,
@@ -120,7 +122,7 @@ export async function claimTask(taskId: bigint, moderator: AuthUser) {
     },
     data: {
       assignedTo: moderator.id,
-      lockedUntil: new Date(now.getTime() + REVIEW_LOCK_MS),
+      lockedUntil: new Date(now.getTime() + lockMs),
       status: "in_review",
     },
   });
@@ -144,7 +146,7 @@ export async function claimTask(taskId: bigint, moderator: AuthUser) {
     targetId: taskId,
   });
 
-  return { taskId, lockedUntil: new Date(Date.now() + REVIEW_LOCK_MS) };
+  return { taskId, lockedUntil: new Date(Date.now() + lockMs) };
 }
 
 export async function releaseTask(taskId: bigint, moderator: AuthUser) {
@@ -169,7 +171,7 @@ export async function getTaskDetail(taskId: bigint, moderator: AuthUser) {
       spot: {
         include: {
           category: { include: { schemas: { where: { isCurrent: true }, take: 1 } } },
-          owner: { select: { uuid: true, nickname: true, creditScore: true, approvedCount: true } },
+          owner: { select: { id: true, uuid: true, role: true, nickname: true, creditScore: true, approvedCount: true } },
           media: {
             orderBy: { id: "asc" },
             include: { blurRegions: { where: { ignored: false }, orderBy: { id: "asc" } } },
@@ -202,7 +204,12 @@ export async function getTaskDetail(taskId: bigint, moderator: AuthUser) {
     select: { revisionNo: true, snapshot: true, createdAt: true },
   });
 
-  const schema = task.spot.category.schemas[0];
+  // 审核台展示条目标作者命中的 Schema 版本——
+  // 灰度用户按新表单填写的内容，必须用同一份 Schema 呈现给审核员
+  const ownerConfig = await resolveConfig(task.spot.owner);
+  const ownerCategory = ownerConfig.categories.find((item) => item.code === task.spot.category.code);
+  const effectiveSchema = ownerCategory?.schema ?? (task.spot.category.schemas[0]?.schema as never);
+  const effectiveSchemaVersion = ownerCategory ? ownerConfig.version : (task.spot.category.schemas[0]?.version ?? 0);
   const now = Date.now();
   const lockActive = task.lockedUntil !== null && task.lockedUntil.getTime() > now;
 
@@ -239,8 +246,8 @@ export async function getTaskDetail(taskId: bigint, moderator: AuthUser) {
         color: task.spot.category.color,
         icon: task.spot.category.icon,
       },
-      schemaVersion: schema?.version ?? 0,
-      schema: schema?.schema ?? {},
+      schemaVersion: effectiveSchemaVersion,
+      schema: effectiveSchema ?? {},
       exactLocation: { lat: task.spot.exactLat, lng: task.spot.exactLng },
       fuzzEnabled: task.spot.fuzzEnabled,
       fuzzRadiusM: task.spot.fuzzRadiusM,

@@ -135,7 +135,7 @@ mediaRouter.get(
   requireRole("moderator"),
   validate({ params: uuidParam }),
   asyncHandler(async (req, res) => {
-    const url = await signedOriginalUrl(req.params.assetUuid);
+    const { url, ttlSeconds } = await signedOriginalUrl(req.params.assetUuid, req.user!);
     await recordAudit({
       actorId: req.user!.id,
       action: AUDIT_ACTIONS.MEDIA_ORIGINAL_VIEW,
@@ -143,7 +143,7 @@ mediaRouter.get(
       reason: "审核需要查看原图",
       req,
     });
-    res.json(ok(req, { url, expiresInSeconds: 300 }));
+    res.json(ok(req, { url, expiresInSeconds: ttlSeconds }));
   }),
 );
 

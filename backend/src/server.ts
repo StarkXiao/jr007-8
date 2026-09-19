@@ -6,9 +6,13 @@ import { initStorage } from "./services/storage";
 import { disconnectPrisma } from "./db/prisma";
 import { closeRedis } from "./db/redis";
 import { closeQueues } from "./services/queue";
+import { ensureBootstrapConfig, initConfigInvalidationSubscriber } from "./modules/config/service";
 
 async function bootstrap(): Promise<void> {
   await initStorage();
+  // 首次部署写入出厂配置 v1，并订阅跨进程的配置失效通知
+  await ensureBootstrapConfig();
+  initConfigInvalidationSubscriber();
 
   const app = createApp();
   const server: Server = app.listen(env.APP_PORT, () => {

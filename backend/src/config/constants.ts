@@ -110,6 +110,13 @@ export const AUDIT_ACTIONS = {
   REPORT_RESOLVE: "report.resolve",
   REPORT_DISMISS: "report.dismiss",
   CATEGORY_SCHEMA_UPDATE: "category.schema.update",
+  CONFIG_DRAFT_SAVE: "config.draft.save",
+  CONFIG_DRAFT_DISCARD: "config.draft.discard",
+  CONFIG_PUBLISH_CANARY: "config.publish.canary",
+  CONFIG_PUBLISH_FULL: "config.publish.full",
+  CONFIG_CANARY_UPDATE: "config.canary.update",
+  CONFIG_CANARY_REVOKE: "config.canary.revoke",
+  CONFIG_ROLLBACK: "config.rollback",
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

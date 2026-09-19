@@ -1,11 +1,6 @@
 import type { Prisma, SpotStatus } from "@prisma/client";
 import { env } from "../../config/env";
-import {
-  CONFIRMATION_COOLDOWN_MS,
-  ERROR_CODES,
-  STALE_REPORT_THRESHOLD,
-  MAX_BBOX_SPAN_DEG,
-} from "../../config/constants";
+import { ERROR_CODES } from "../../config/constants";
 import { prisma, toJsonValue } from "../../db/prisma";
 import { AppError } from "../../utils/errors";
 import { parsePagination, pagedResult } from "../../utils/pagination";
@@ -13,7 +8,8 @@ import { assertNoBlockedContent, assertNoPii, checkText } from "../../services/m
 import { computeFreshness } from "../../services/moderation/credit";
 import { boundingBox, fuzzCoordinates, haversineMeters, isValidLatLng, reverseGeocode } from "../../services/geo";
 import { assertAttributesValid, validateAttributes } from "../categories/schemaValidator";
-import { requireCategoryByCode } from "../categories/service";
+import { requireCategoryByCode, requireMaterializedCategoryId } from "../categories/service";
+import { getThreshold, getThresholds, resolveConfig } from "../config/service";
 import { serializeSpot } from "../shared/serialize";
 import type { AuthUser } from "../../types/auth";
 import { isModerator } from "../../types/auth";
@@ -68,7 +64,7 @@ function parseAttributeFilters(raw: string[]): Array<{ key: string; value: unkno
     });
 }
 
-function parseBbox(raw: string | undefined) {
+function parseBbox(raw: string | undefined, maxSpanDeg: number) {
   if (!raw) return undefined;
   const parts = raw.split(",").map((value) => Number(value.trim()));
   if (parts.length !== 4 || parts.some((value) => !Number.isFinite(value))) {
@@ -78,7 +74,7 @@ function parseBbox(raw: string | undefined) {
   if (!isValidLatLng(minLat, minLng) || !isValidLatLng(maxLat, maxLng)) {
     throw AppError.badRequest("bbox 坐标超出合法范围");
   }
-  if (Math.abs(maxLng - minLng) > MAX_BBOX_SPAN_DEG || Math.abs(maxLat - minLat) > MAX_BBOX_SPAN_DEG) {
+  if (Math.abs(maxLng - minLng) > maxSpanDeg || Math.abs(maxLat - minLat) > maxSpanDeg) {
     throw AppError.badRequest("地图范围过大，请放大后再筛选");
   }
   return { minLng, minLat, maxLng, maxLat };
@@ -133,7 +129,8 @@ export async function listSpots(query: ListSpotsQuery, viewer?: AuthUser) {
   const pagination = parsePagination(query);
   const where: Prisma.SpotWhereInput = { status: "published", deletedAt: null };
 
-  const bbox = parseBbox(query.bbox);
+  const maxBboxSpan = await getThreshold("maxBboxSpanDeg", viewer);
+  const bbox = parseBbox(query.bbox, maxBboxSpan);
   const near = parseNear(query.near);
   const radius = query.radius ?? 1000;
 
@@ -274,7 +271,7 @@ async function attachMedia(spotId: bigint | null, ownerId: bigint, mediaUuids: s
 }
 
 export async function createDraft(user: AuthUser, input: CreateSpotInput) {
-  const category = await requireCategoryByCode(input.categoryCode);
+  const category = await requireCategoryByCode(input.categoryCode, user);
 
   if (!isValidLatLng(input.lat, input.lng)) throw AppError.badRequest("坐标不合法");
   if (input.mediaUuids.length > 6) throw AppError.badRequest("最多上传 6 张图片");
@@ -293,10 +290,12 @@ export async function createDraft(user: AuthUser, input: CreateSpotInput) {
   }
 
   // 草稿阶段不强制必填属性，用户可以先存一半再去现场确认
+  // 外键用物化表的真实 id：灰度新分类在发布时已以停用状态补建
+  const categoryId = category.id !== 0n ? category.id : await requireMaterializedCategoryId(input.categoryCode);
   const spot = await prisma.spot.create({
     data: {
       ownerId: user.id,
-      categoryId: category.id,
+      categoryId,
       status: "draft",
       title: input.title,
       description: input.description || null,
@@ -340,8 +339,10 @@ export async function updateSpot(uuid: string, user: AuthUser, input: UpdateSpot
   }
 
   if (input.categoryCode !== undefined) {
-    const category = await requireCategoryByCode(input.categoryCode);
-    data.category = { connect: { id: category.id } };
+    const category = await requireCategoryByCode(input.categoryCode, user);
+    data.category = {
+      connect: { id: category.id !== 0n ? category.id : await requireMaterializedCategoryId(input.categoryCode) },
+    };
   }
   if (input.attributes !== undefined) data.attributes = toJsonValue(input.attributes);
   if (input.lat !== undefined) data.exactLat = input.lat;
@@ -417,6 +418,7 @@ export async function runAutoCheck(spotId: bigint): Promise<AutoCheckResult> {
     where: { id: spotId },
     include: {
       category: { include: { schemas: { where: { isCurrent: true }, take: 1 } } },
+      owner: { select: { id: true, uuid: true, role: true } },
       media: true,
     },
   });
@@ -425,10 +427,12 @@ export async function runAutoCheck(spotId: bigint): Promise<AutoCheckResult> {
   const issues: AutoCheckIssue[] = [];
   const meta: Record<string, unknown> = {};
 
-  // 1) 必填属性
-  const schema = spot.category.schemas[0];
-  if (schema) {
-    const result = validateAttributes(schema.schema as never, (spot.attributes ?? {}) as Record<string, unknown>);
+  // 1) 必填属性——按条目标作者命中的配置版本校验（灰度用户按灰度 Schema 预检）
+  const ownerConfig = await resolveConfig(spot.owner);
+  const effectiveCategory = ownerConfig.categories.find((category) => category.code === spot.category.code);
+  if (effectiveCategory) {
+    meta.configVersion = ownerConfig.version;
+    const result = validateAttributes(effectiveCategory.schema, (spot.attributes ?? {}) as Record<string, unknown>);
     if (!result.ok) {
       issues.push(...result.errors.map((error) => ({ code: "ATTRIBUTE_INVALID", message: error.message })));
     }
@@ -467,7 +471,8 @@ export async function runAutoCheck(spotId: bigint): Promise<AutoCheckResult> {
   // 用精确坐标而不是 publicLat/publicLng：后者只有发布后才有值，
   // 而重复提交恰恰最容易发生在两条都还在待审的时候。
   // 精确坐标只在服务端参与比对，不会外泄。
-  const box = boundingBox({ lat: spot.exactLat, lng: spot.exactLng }, 100);
+  const duplicateRadiusMeters = await getThreshold("duplicateRadiusMeters", spot.owner);
+  const box = boundingBox({ lat: spot.exactLat, lng: spot.exactLng }, duplicateRadiusMeters);
   const neighbors = await prisma.spot.findMany({
     where: {
       id: { not: spot.id },
@@ -480,10 +485,10 @@ export async function runAutoCheck(spotId: bigint): Promise<AutoCheckResult> {
     take: 50,
   });
 
-  // 包围盒是超集，再用真实距离收一次，保证"100 米内"这个判断准确
+  // 包围盒是超集，再用真实距离收一次，保证"半径内"这个判断准确
   const origin = { lat: spot.exactLat, lng: spot.exactLng };
   const duplicates = neighbors
-    .filter((neighbor) => haversineMeters(origin, { lat: neighbor.exactLat, lng: neighbor.exactLng }) <= 100)
+    .filter((neighbor) => haversineMeters(origin, { lat: neighbor.exactLat, lng: neighbor.exactLng }) <= duplicateRadiusMeters)
     .map((neighbor) => ({
       uuid: neighbor.uuid,
       similarity: textSimilarity(spot.title, neighbor.title),
@@ -493,7 +498,7 @@ export async function runAutoCheck(spotId: bigint): Promise<AutoCheckResult> {
   if (duplicates.length > 0) {
     issues.push({
       code: "DUPLICATE_SUSPECTED",
-      message: "附近 100 米内已有一条高度相似的记录，请确认是否重复",
+      message: `附近 ${duplicateRadiusMeters} 米内已有一条高度相似的记录，请确认是否重复`,
     });
     meta.duplicates = duplicates;
   }
@@ -502,7 +507,8 @@ export async function runAutoCheck(spotId: bigint): Promise<AutoCheckResult> {
   const recentCount = await prisma.spot.count({
     where: { ownerId: spot.ownerId, createdAt: { gte: new Date(Date.now() - 10 * 60 * 1000) } },
   });
-  if (recentCount > 5) {
+  const burstLimit = await getThreshold("submitBurstLimit", spot.owner);
+  if (recentCount > burstLimit) {
     issues.push({ code: "TOO_FREQUENT", message: "短时间提交过于频繁，请稍后再试" });
   }
   meta.recentCount = recentCount;
@@ -572,7 +578,7 @@ export async function submitForReview(uuid: string, user: AuthUser, options: { f
     );
   }
 
-  const category = await requireCategoryByCode(spot.category.code);
+  const category = await requireCategoryByCode(spot.category.code, user);
 
   // 提交时必须齐备必填属性——草稿宽容，提交严格
   assertAttributesValid(category.schema, (spot.attributes ?? {}) as Record<string, unknown>);
@@ -713,11 +719,18 @@ export async function confirmSpot(uuid: string, user: AuthUser, isAccurate: bool
   if (!spot || spot.status !== "published") throw AppError.notFound("该地点不存在或尚未发布");
   if (spot.ownerId === user.id) throw AppError.badRequest("不能确认自己提交的条目，请邀请其他人来确认");
 
+  const thresholds = await getThresholds(user);
+  const cooldownMs = thresholds.confirmationCooldownDays * MS_PER_DAY;
   const recent = await prisma.spotConfirmation.findFirst({
-    where: { spotId: spot.id, userId: user.id, createdAt: { gte: new Date(Date.now() - CONFIRMATION_COOLDOWN_MS) } },
+    where: { spotId: spot.id, userId: user.id, createdAt: { gte: new Date(Date.now() - cooldownMs) } },
   });
   if (recent) {
-    throw AppError.conflict(ERROR_CODES.ALREADY_CONFIRMED, "你最近已经确认过这条记录，30 天后可以再次确认");
+    throw AppError.conflict(
+      ERROR_CODES.ALREADY_CONFIRMED,
+      thresholds.confirmationCooldownDays > 0
+        ? `你最近已经确认过这条记录，${thresholds.confirmationCooldownDays} 天后可以再次确认`
+        : "你最近已经确认过这条记录",
+    );
   }
 
   await prisma.spotConfirmation.create({
@@ -741,7 +754,7 @@ export async function confirmSpot(uuid: string, user: AuthUser, isAccurate: bool
     publishedAt: spot.publishedAt,
   });
 
-  const shouldMarkStale = !isAccurate && staleReportCount >= STALE_REPORT_THRESHOLD;
+  const shouldMarkStale = !isAccurate && staleReportCount >= thresholds.staleReportThreshold;
 
   await prisma.spot.update({
     where: { id: spot.id },

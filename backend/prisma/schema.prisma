@@ -85,6 +85,17 @@ enum BlurAlgorithm {
   gaussian
 }
 
+// 在线配置版本生命周期：
+// draft（草稿，可反复改、可预演）→ canary（灰度中，命中规则的用户读到它）
+// → active（全量生效，同时只有一个）；旧的 active/canary 一律变 archived。
+// archived 永久保留，回滚就是用它的内容再发一个新版本。
+enum AppConfigStatus {
+  draft
+  canary
+  active
+  archived
+}
+
 model User {
   id            BigInt     @id @default(autoincrement())
   uuid          String     @unique @default(uuid()) @db.Uuid
@@ -121,6 +132,8 @@ model User {
   reviewTasksDecided ReviewTask[]      @relation("ReviewDecidedBy")
   blurRegions       BlurRegion[]
   categorySchemas   CategorySchema[]
+  configVersions    AppConfigVersion[] @relation("AppConfigActor")
+  configPublished   AppConfigVersion[] @relation("AppConfigPublisher")
   settings          UserSetting?
 
   @@index([role, status], map: "idx_users_role_status")
@@ -470,4 +483,30 @@ model AuditLog {
   @@index([targetType, targetId, createdAt], map: "idx_audit_target")
   @@index([action, createdAt], map: "idx_audit_action")
   @@map("audit_logs")
+}
+
+// 在线配置的不可变版本档案。一份配置同时包含：
+//   categories —— 分类与属性表单（属性 Schema）
+//   thresholds —— 业务阈值（审核锁、编辑窗口、过期上报数等）
+// 两者打包发布，保证"某次线上变更"是一个可审查、可整体回滚的整体。
+model AppConfigVersion {
+  id          BigInt         @id @default(autoincrement())
+  version     Int            @unique
+  status      AppConfigStatus
+  // 分类 + 属性 Schema + 阈值的完整内容，见 modules/config/types.ts
+  payload     Json
+  // 灰度命中规则（仅 canary 状态下生效）：尾号取模、角色、用户 UUID 白名单、随机比例
+  rollout     Json?
+  comment     String?        @db.VarChar(200)
+  createdBy   BigInt?        @map("created_by")
+  publishedBy BigInt?        @map("published_by")
+  createdAt   DateTime       @default(now()) @map("created_at") @db.Timestamptz(6)
+  updatedAt   DateTime       @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+  publishedAt DateTime?      @map("published_at") @db.Timestamptz(6)
+
+  creator   User? @relation("AppConfigActor", fields: [createdBy], references: [id])
+  publisher User? @relation("AppConfigPublisher", fields: [publishedBy], references: [id])
+
+  @@index([status], map: "idx_app_config_status")
+  @@map("app_config_versions")
 }

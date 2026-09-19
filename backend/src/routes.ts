@@ -9,6 +9,7 @@ import { reportsRouter, moderationReportsRouter } from "./modules/reports/routes
 import { notificationsRouter } from "./modules/notifications/routes";
 import { usersRouter } from "./modules/users/routes";
 import { adminRouter } from "./modules/admin/routes";
+import { adminConfigRouter } from "./modules/config/routes";
 import { REVIEW_REASON_CODES, REPORT_REASONS, NOTIFICATION_TYPES } from "./config/constants";
 import { ok } from "./utils/serialize";
 import { asyncHandler } from "./utils/asyncHandler";
@@ -48,6 +49,7 @@ export function buildApiRouter(): Router {
   router.use("/moderation", moderationMediaRouter);
   router.use(moderationCommentsRouter);
   router.use(moderationReportsRouter);
+  router.use(adminConfigRouter);
   router.use(adminRouter);
 
   return router;

@@ -1,10 +1,5 @@
 import type { CommentStatus } from "@prisma/client";
-import {
-  AUDIT_ACTIONS,
-  COMMENT_EDIT_WINDOW_MS,
-  COMMENT_MAX_EDITS,
-  ERROR_CODES,
-} from "../../config/constants";
+import { AUDIT_ACTIONS, ERROR_CODES } from "../../config/constants";
 import { env } from "../../config/env";
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../utils/errors";
@@ -13,9 +8,12 @@ import { checkText } from "../../services/moderation/contentFilter";
 import { adjustCredit, CREDIT_DELTAS } from "../../services/moderation/credit";
 import { notify } from "../../services/notify";
 import { recordAudit } from "../../services/audit";
+import { getThresholds } from "../config/service";
 import { serializeComment } from "../shared/serialize";
 import { isModerator } from "../../types/auth";
 import type { AuthUser } from "../../types/auth";
+
+const MINUTE_MS = 60_000;
 
 const PII_CODE = ERROR_CODES.COMMENT_PII_BLOCKED;
 
@@ -193,11 +191,15 @@ export async function updateComment(commentId: bigint, user: AuthUser, body: str
   if (!comment || comment.status === "deleted") throw AppError.notFound("评论不存在");
   if (comment.userId !== user.id) throw AppError.forbidden("只能编辑自己的评论");
 
-  if (Date.now() - comment.createdAt.getTime() > COMMENT_EDIT_WINDOW_MS) {
-    throw AppError.unprocessable(ERROR_CODES.SPOT_STATE_INVALID, "评论发布 10 分钟后不能再编辑");
+  // 编辑窗口与次数都是在线配置项，按该用户命中的版本取值（灰度可先验证新规则）
+  const thresholds = await getThresholds(user);
+  const editWindowMs = thresholds.commentEditWindowMinutes * MINUTE_MS;
+
+  if (thresholds.commentEditWindowMinutes > 0 && Date.now() - comment.createdAt.getTime() > editWindowMs) {
+    throw AppError.unprocessable(ERROR_CODES.SPOT_STATE_INVALID, `评论发布 ${thresholds.commentEditWindowMinutes} 分钟后不能再编辑`);
   }
-  if (comment.editCount >= COMMENT_MAX_EDITS) {
-    throw AppError.unprocessable(ERROR_CODES.SPOT_STATE_INVALID, "评论只能编辑 1 次");
+  if (comment.editCount >= thresholds.commentMaxEdits) {
+    throw AppError.unprocessable(ERROR_CODES.SPOT_STATE_INVALID, `评论只能编辑 ${thresholds.commentMaxEdits} 次`);
   }
 
   assertCommentContent(body);

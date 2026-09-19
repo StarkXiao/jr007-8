@@ -4,7 +4,6 @@ import {
   AUDIT_ACTIONS,
   ERROR_CODES,
   PRIVACY_SENSITIVE_REASONS,
-  REPORT_MERGE_WINDOW_MS,
   REPORT_REASONS,
   REPORT_TARGET_TYPES,
   type ReportReason,
@@ -16,6 +15,7 @@ import { parsePagination, pagedResult } from "../../utils/pagination";
 import { notify } from "../../services/notify";
 import { recordAudit } from "../../services/audit";
 import { adjustCredit, CREDIT_DELTAS } from "../../services/moderation/credit";
+import { getThreshold } from "../config/service";
 import { revokePublicVariants } from "../media/service";
 import { isAdmin } from "../../types/auth";
 import type { AuthUser } from "../../types/auth";
@@ -103,14 +103,15 @@ export async function createReport(reporter: AuthUser, input: CreateReportInput)
     throw AppError.conflict(ERROR_CODES.DUPLICATE_REPORT, "你已经举报过这条内容，我们会在处理完成后通知你");
   }
 
-  // 同对象 24 小时内的多个举报合并到同一个工单，避免审核员重复劳动
+  // 合并窗口为在线配置项（灰度时只影响命中用户的新举报，存量工单不动）
+  const mergeWindowMs = (await getThreshold("reportMergeWindowMinutes", reporter)) * 60_000;
   const mergeTarget = await prisma.report.findFirst({
     where: {
       targetType: input.targetType,
       targetId: input.targetId,
       status: { in: ["open", "in_review"] },
       mergedInto: null,
-      createdAt: { gte: new Date(Date.now() - REPORT_MERGE_WINDOW_MS) },
+      createdAt: { gte: new Date(Date.now() - mergeWindowMs) },
     },
     orderBy: { createdAt: "asc" },
   });

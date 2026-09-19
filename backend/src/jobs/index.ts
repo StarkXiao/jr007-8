@@ -1,6 +1,6 @@
 import { prisma } from "../db/prisma";
 import { env } from "../config/env";
-import { STALE_REPORT_THRESHOLD } from "../config/constants";
+import { resolveSystemConfig } from "../modules/config/service";
 import { computeFreshness } from "../services/moderation/credit";
 import { purgeOriginal } from "../modules/media/service";
 import { notify } from "../services/notify";
@@ -80,6 +80,11 @@ export async function slaSweep(): Promise<{ overdueTasks: number; overdueReports
  * 重算分数、标记过期条目，并为过期条目生成待复核任务。
  */
 export async function staleSweep(): Promise<{ recomputed: number; markedStale: number }> {
+  // 定时任务是系统视角，只按全量版本执行；灰度规则不影响批处理这种全站行为
+  const systemConfig = await resolveSystemConfig();
+  const staleReportThreshold = systemConfig.thresholds.staleReportThreshold;
+  const freshnessFloor = systemConfig.thresholds.staleFreshnessFloor;
+
   const spots = await prisma.spot.findMany({
     where: { status: "published", deletedAt: null },
     select: {
@@ -109,11 +114,11 @@ export async function staleSweep(): Promise<{ recomputed: number; markedStale: n
       publishedAt: spot.publishedAt,
     });
 
-    // 长期没有任何确认，且分数跌破 30，视为疑似过期
+    // 长期没有任何确认，且分数跌破阈值，视为疑似过期
     const shouldMarkStale =
       !spot.isStale &&
-      (spot.staleReportCount >= STALE_REPORT_THRESHOLD ||
-        (freshnessScore < 30 && spot.confirmCount === 0));
+      (spot.staleReportCount >= staleReportThreshold ||
+        (freshnessScore < freshnessFloor && spot.confirmCount === 0));
 
     await prisma.spot.update({
       where: { id: spot.id },

@@ -12,6 +12,7 @@ import { cleanup, purgeOriginalImages, slaSweep, staleSweep } from "./jobs";
 import { initStorage } from "./services/storage";
 import { disconnectPrisma } from "./db/prisma";
 import { closeRedis, redis } from "./db/redis";
+import { ensureBootstrapConfig, initConfigInvalidationSubscriber } from "./modules/config/service";
 import { logger } from "./utils/logger";
 
 // 定时任务调度配置。
@@ -41,6 +42,8 @@ async function runSweep(task: SweepJobData["task"]) {
 
 async function bootstrap(): Promise<void> {
   await initStorage();
+  await ensureBootstrapConfig();
+  initConfigInvalidationSubscriber();
 
   const imageWorker = new Worker<ImageJobData>(
     QUEUE_NAMES.IMAGE,

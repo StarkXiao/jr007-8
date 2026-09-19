@@ -1,6 +1,7 @@
 import { prisma } from "../../db/prisma";
 import { AppError } from "../../utils/errors";
-import { assertValidSchema, isAttributeSchema, type AttributeSchema } from "./schemaValidator";
+import { isAttributeSchema, type AttributeSchema } from "./schemaValidator";
+import { resolveConfig } from "../config/service";
 
 export interface CategoryWithSchema {
   id: bigint;
@@ -15,155 +16,68 @@ export interface CategoryWithSchema {
   schemaVersion: number;
 }
 
-export async function listCategories(options: { includeInactive?: boolean } = {}): Promise<CategoryWithSchema[]> {
-  const categories = await prisma.category.findMany({
-    where: options.includeInactive ? {} : { isActive: true },
-    orderBy: [{ sortOrder: "asc" }, { id: "asc" }],
-    include: {
-      schemas: {
-        where: { isCurrent: true },
-        take: 1,
-      },
-    },
-  });
+/**
+ * 分类与属性 Schema 的读取全部来自在线配置（支持灰度）。
+ * categories 物化表仅用于外键关联，这里按 code 补上它的数字 id。
+ */
+export async function listCategories(
+  options: { includeInactive?: boolean; user?: { id: bigint; uuid: string; role: string } } = {},
+): Promise<Array<CategoryWithSchema & { configStatus: "active" | "canary" }>> {
+  const config = await resolveConfig(options.user);
+  const codes = config.categories.map((category) => category.code);
+  const materialized = codes.length
+    ? await prisma.category.findMany({ where: { code: { in: codes } }, select: { id: true, code: true } })
+    : [];
+  const idByCode = new Map(materialized.map((row) => [row.code, row.id]));
 
-  return categories.map((category) => {
-    const schema = category.schemas[0];
-    if (!schema || !isAttributeSchema(schema.schema)) {
-      throw new AppError(
-        500,
-        "INTERNAL_ERROR",
-        `分类 ${category.code} 缺少可用的属性 Schema`,
-      );
-    }
-    return {
-      id: category.id,
-      code: category.code,
-      name: category.name,
-      icon: category.icon,
-      color: category.color,
-      description: category.description,
-      sortOrder: category.sortOrder,
-      isActive: category.isActive,
-      schema: schema.schema,
-      schemaVersion: schema.version,
-    };
-  });
+  return config.categories
+    .filter((category) => options.includeInactive || category.isActive)
+    .map((category) => {
+      if (!isAttributeSchema(category.schema)) {
+        throw new AppError(500, "INTERNAL_ERROR", `分类 ${category.code} 的属性 Schema 不合法`);
+      }
+      return {
+        // 灰度中新分类可能尚未物化（只在发布时物化），用 0 占位；调用方只在需要外键时才用 id
+        id: idByCode.get(category.code) ?? 0n,
+        code: category.code,
+        name: category.name,
+        icon: category.icon,
+        color: category.color,
+        description: category.description,
+        sortOrder: category.sortOrder,
+        isActive: category.isActive,
+        schema: category.schema,
+        schemaVersion: config.version,
+        configStatus: config.status,
+      };
+    });
 }
 
-export async function getCategoryByCode(code: string): Promise<CategoryWithSchema | undefined> {
-  const categories = await listCategories({ includeInactive: true });
+export async function getCategoryByCode(
+  code: string,
+  user?: { id: bigint; uuid: string; role: string },
+): Promise<(CategoryWithSchema & { configStatus: "active" | "canary" }) | undefined> {
+  const categories = await listCategories({ includeInactive: true, user });
   return categories.find((category) => category.code === code);
 }
 
-export async function requireCategoryByCode(code: string): Promise<CategoryWithSchema> {
-  const category = await getCategoryByCode(code);
+export async function requireCategoryByCode(
+  code: string,
+  user?: { id: bigint; uuid: string; role: string },
+): Promise<CategoryWithSchema & { configStatus: "active" | "canary" }> {
+  const category = await getCategoryByCode(code, user);
   if (!category) throw AppError.badRequest(`分类不存在：${code}`);
   if (!category.isActive) throw AppError.badRequest(`分类已停用：${category.name}`);
   return category;
 }
 
-export async function createCategory(input: {
-  code: string;
-  name: string;
-  icon: string;
-  color: string;
-  description?: string;
-  sortOrder?: number;
-  schema: unknown;
-  actorId: bigint;
-}) {
-  const schema = assertValidSchema(input.schema);
-
-  const existing = await prisma.category.findUnique({ where: { code: input.code } });
-  if (existing) throw AppError.conflict("VALIDATION_FAILED", `分类代码已存在：${input.code}`);
-
-  return prisma.category.create({
-    data: {
-      code: input.code,
-      name: input.name,
-      icon: input.icon,
-      color: input.color,
-      description: input.description ?? null,
-      sortOrder: input.sortOrder ?? 0,
-      schemas: {
-        create: {
-          version: 1,
-          schema: schema as unknown as object,
-          isCurrent: true,
-          createdBy: input.actorId,
-        },
-      },
-    },
-    select: { id: true, code: true, name: true },
-  });
-}
-
-export async function updateCategory(
-  id: bigint,
-  input: {
-    name?: string;
-    icon?: string;
-    color?: string;
-    description?: string;
-    sortOrder?: number;
-    isActive?: boolean;
-  },
-) {
-  const category = await prisma.category.findUnique({ where: { id } });
-  if (!category) throw AppError.notFound("分类不存在");
-
-  return prisma.category.update({
-    where: { id },
-    data: {
-      name: input.name,
-      icon: input.icon,
-      color: input.color,
-      description: input.description,
-      sortOrder: input.sortOrder,
-      isActive: input.isActive,
-    },
-    select: { id: true, code: true, name: true, isActive: true },
-  });
-}
-
 /**
- * 发布新的属性 Schema 版本。
- * 旧版本保留，已有条目不会被破坏；新版本只对新提交生效。
+ * 取分类在物化表里的真实数字 id（spots.categoryId 外键需要）。
+ * 灰度里新增的分类在发布时已以「停用」补建到物化表，所以这里一定查得到；
+ * 查不到属于数据不一致，直接 500 而不是静默写入 0。
  */
-export async function publishSchema(categoryId: bigint, schemaInput: unknown, actorId: bigint) {
-  const schema = assertValidSchema(schemaInput);
-  const category = await prisma.category.findUnique({ where: { id: categoryId } });
-  if (!category) throw AppError.notFound("分类不存在");
-
-  const latest = await prisma.categorySchema.findFirst({
-    where: { categoryId },
-    orderBy: { version: "desc" },
-    select: { version: true, schema: true },
-  });
-
-  if (latest && JSON.stringify(latest.schema) === JSON.stringify(schema)) {
-    // 内容完全一致时不再产生新版本，避免版本号无意义膨胀
-    return { version: latest.version, changed: false };
-  }
-
-  const nextVersion = (latest?.version ?? 0) + 1;
-
-  await prisma.$transaction([
-    prisma.categorySchema.updateMany({
-      where: { categoryId, isCurrent: true },
-      data: { isCurrent: false },
-    }),
-    prisma.categorySchema.create({
-      data: {
-        categoryId,
-        version: nextVersion,
-        schema: schema as unknown as object,
-        isCurrent: true,
-        createdBy: actorId,
-      },
-    }),
-  ]);
-
-  return { version: nextVersion, changed: true, previous: latest?.schema ?? null };
+export async function requireMaterializedCategoryId(code: string): Promise<bigint> {
+  const row = await prisma.category.findUnique({ where: { code }, select: { id: true } });
+  if (!row) throw new AppError(500, "INTERNAL_ERROR", `分类 ${code} 尚未物化，无法关联条目`);
+  return row.id;
 }

@@ -23,6 +23,7 @@ async function loadDecidableTask(taskId: bigint, moderator: AuthUser) {
         include: {
           media: { select: { uuid: true, privacyStatus: true } },
           category: true,
+          owner: { select: { id: true, uuid: true, role: true } },
         },
       },
       revision: true,
@@ -92,8 +93,10 @@ export async function approveTask(
   const task = await loadDecidableTask(taskId, moderator);
   assertAllPublishable(task.spot.media);
 
-  const category = await requireCategoryByCode(task.spot.category.code);
-  assertAttributesValid(category.schema, (task.spot.attributes ?? {}) as Record<string, unknown>);
+  // 属性按条目标作者命中的配置版本校验，不能用审核员视角，
+  // 否则灰度用户按新表单填的内容会被审核员的旧 Schema 卡掉
+  const ownerCategory = await requireCategoryByCode(task.spot.category.code, task.spot.owner);
+  assertAttributesValid(ownerCategory.schema, (task.spot.attributes ?? {}) as Record<string, unknown>);
 
   const { point, addressText } = await resolvePublicPoint(task.spot);
   const now = new Date();
@@ -294,7 +297,11 @@ export async function decideAppeal(
     where: { id: taskId },
     include: {
       spot: {
-        include: { media: { select: { uuid: true, privacyStatus: true } }, category: true },
+        include: {
+          media: { select: { uuid: true, privacyStatus: true } },
+          category: true,
+          owner: { select: { id: true, uuid: true, role: true } },
+        },
       },
       revision: true,
       appealOf: true,
@@ -346,7 +353,7 @@ export async function decideAppeal(
   // 改判通过仍需通过隐私门禁——改判不能成为绕过隐私要求的后门
   assertAllPublishable(task.spot.media);
 
-  const category = await requireCategoryByCode(task.spot.category.code);
+  const category = await requireCategoryByCode(task.spot.category.code, task.spot.owner);
   assertAttributesValid(category.schema, (task.spot.attributes ?? {}) as Record<string, unknown>);
 
   const { point, addressText } = await resolvePublicPoint(task.spot);
